@@ -414,11 +414,10 @@ Intent: {intent_key or "unknown"}.
     return llm_chat(msgs, temperature=0.2)
 
 def answer_fallback(user_text: str) -> str:
-    system = """You are Style Loom's virtual assistant.
-    system = """You are Style Loom's virtual assistant for a fashion retail study.
-Provide a relevant, concise response to the user's question, without inventing details.
-If required information is missing, ask ONE clarifying question. Keep the reply to 2–4 sentences, neutral tone, no emojis."""
-    return llm_chat(msgs, temperature=0.5)
+system = """You are Style Loom's virtual assistant for a fashion retail study.
+Your task is to provide responses that follow the experimental instructions precisely.
+Only respond to what the user explicitly asks.
+"""
 
 def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, bool]:
     intent_key = scenario_to_intent(scenario)
