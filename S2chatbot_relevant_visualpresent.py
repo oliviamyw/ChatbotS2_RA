@@ -414,10 +414,10 @@ Intent: {intent_key or "unknown"}.
     return llm_chat(msgs, temperature=0.2)
 
 def answer_fallback(user_text: str) -> str:
-system = """You are Style Loom's virtual assistant for a fashion retail study.
-Your task is to provide responses that follow the experimental instructions precisely.
-Only respond to what the user explicitly asks.
-"""
+    system = """You are Style Loom's virtual assistant for a fashion retail study.
+    Your task is to provide responses that follow the experimental instructions precisely.
+    Only respond to what the user explicitly asks.
+    """
 
 def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, bool]:
     intent_key = scenario_to_intent(scenario)
