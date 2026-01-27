@@ -632,26 +632,7 @@ if st.session_state.ended and not st.session_state.rating_saved:
             "satisfaction": int(rating),
         }
         supabase.table(TBL_SESSIONS).upsert(session_payload).execute()
-
-        # Save all turns (optional but recommended for text-mining)
-        try:
-            turns_rows = []
-            for spk, msg in st.session_state.chat_history:
-                role = "assistant" if spk == chatbot_speaker() else "user"
-                if spk == "User":
-                    role = "user"
-                elif spk == chatbot_speaker():
-                    role = "assistant"
-                turns_rows.append({
-                    "session_id": st.session_state.session_id,
-                    "role": role,
-                    "message": msg,
-                })
-            if turns_rows:
-                supabase.table("turns").insert(turns_rows).execute()
-        except Exception:
-            # turns logging should never block completion
-            pass
+        # (TURN-LEVEL LOGGING DISABLED) We store only the final session-level transcript in public.sessions.
 
         st.session_state.rating_saved = True
         st.success("Saved. Thank you.")
