@@ -22,10 +22,14 @@
 #       picture_present text,
 #       scenario text,
 #       user_turns int,
-#       bot_turns int
+#       bot_turns int,
+#       prolific_id text
 #   )
-#   public.transcripts(id bigserial, session_id text, ts timestamptz, transcript_text text)
+#   public.transcripts(id bigserial, session_id text, ts timestamptz, transcript_text text, satisfaction int)
 #   public.satisfaction(id bigserial, session_id text, ts timestamptz, rating int)
+#
+# IMPORTANT CHANGE (per your request):
+#   - NOTHING is written to Supabase until the user clicks "Submit rating and save".
 # =========================
 
 import os
@@ -98,7 +102,6 @@ def get_supabase():
 supabase = get_supabase()
 
 
-# -------------------------
 # -------------------------
 # Study 2 cell condition (THIS FILE)
 # -------------------------
@@ -204,7 +207,7 @@ def scenario_to_intent(scenario: Optional[str]) -> str:
 
 
 # -------------------------
-# Intent detection (ENGLISH ONLY) for auto-switch (Option C)
+# Intent detection (ENGLISH ONLY) for auto-switch
 # -------------------------
 INTENT_KEYWORDS: Dict[str, List[str]] = {
     "new_arrivals": ["new drop", "new arrivals", "new arrival", "new collection", "latest", "this season"],
@@ -226,7 +229,6 @@ INTENT_TO_SCENARIO = {
     "about": "About the brand",
 }
 
-
 def detect_intent(user_text: str) -> Optional[str]:
     t = (user_text or "").strip().lower()
     if not t:
@@ -243,7 +245,7 @@ def detect_intent(user_text: str) -> Optional[str]:
 
 
 # -------------------------
-# Availability: product-type locking to prevent category jumps (pants -> jacket)
+# Availability: product-type locking
 # -------------------------
 PRODUCT_TYPE_KEYWORDS = {
     "pants": ["pants", "training pants", "joggers", "leggings", "trousers", "sweatpants"],
@@ -414,10 +416,9 @@ Intent: {intent_key or "unknown"}.
     return llm_chat(msgs, temperature=0.2)
 
 def answer_fallback(user_text: str) -> str:
-    system = """You are Style Loom's virtual assistant for a fashion retail study.
-    Your task is to provide responses that follow the experimental instructions precisely.
-    Only respond to what the user explicitly asks.
-    """
+    # If KB has nothing, keep it deterministic and minimal (still "relevant" in the sense of not hallucinating).
+    return "Could you please share a bit more detail so I can help (e.g., the item name and what you are trying to find)?"
+
 
 def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, bool]:
     intent_key = scenario_to_intent(scenario)
@@ -451,7 +452,7 @@ def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, 
         if context.strip():
             used_kb = True
 
-    # 3) GPT fallback
+    # 3) GPT fallback (deterministic text, no DB writes)
     if not context.strip():
         st.session_state["last_kb_context"] = ""
         st.session_state["last_intent_used"] = intent_key
@@ -480,7 +481,6 @@ defaults = {
     "last_user_selected_scenario": "— Select a scenario —",
     "active_scenario": None,
     "switch_log": [],
-    "session_started_logged": False,
     "last_kb_context": "",
     "last_intent_used": None,
     "active_product_type": None,
@@ -491,37 +491,9 @@ for k, v in defaults.items():
 
 
 # -------------------------
-# Supabase: log session start ONCE
-# -------------------------
-def log_session_start_once():
-    if st.session_state.session_started_logged:
-        return
-
-    ts_now = datetime.datetime.utcnow().isoformat() + "Z"
-    payload = {
-        "session_id": st.session_state.session_id,
-        "ts_start": ts_now,
-        "identity_option": identity_option,
-        "relevance_condition": relevance_condition,
-        "name_present": "present" if show_name else "absent",
-        "picture_present": "present" if show_picture else "absent",
-    }
-    # Backward-compatible write in case the Supabase table does not yet include new columns.
-    try:
-        supabase.table(TBL_SESSIONS).upsert(payload).execute()
-    except Exception:
-        payload.pop("relevance_condition", None)
-        supabase.table(TBL_SESSIONS).upsert(payload).execute()
-
-    st.session_state.session_started_logged = True
-
-
-# -------------------------
-# Greeting (first assistant message) - EXACT TEXT YOU PROVIDED
+# Greeting (first assistant message) - NO DB WRITE HERE
 # -------------------------
 if not st.session_state.greeted_once:
-    log_session_start_once()
-
     greet_text = (
         "Hi, I’m Skyler, Style Loom’s virtual assistant. "
         "I’m here to help with your shopping questions."
@@ -599,11 +571,9 @@ with end_col2:
         else:
             st.caption(f"Progress: {completed}/{MIN_USER_TURNS}. You can end the chat now.")
 
+
 # -------------------------
-# Save ONLY at the end
-# -------------------------
-# -------------------------
-# Save ONLY at the end (transcripts + satisfaction + sessions end)
+# Save ONLY at the end (Submit button is the ONLY trigger)
 # -------------------------
 if st.session_state.ended and not st.session_state.rating_saved:
     rating = st.slider("Overall satisfaction with the chatbot (1 = very low, 7 = very high)", 1, 7, 4)
@@ -641,15 +611,26 @@ if st.session_state.ended and not st.session_state.rating_saved:
 
         transcript_text = "\n".join(transcript_lines)
 
-        # 1) Save transcript (NOW includes satisfaction column)
+        # 0) Ensure "session start" exists ONLY NOW (no auto rows on page load)
+        # We set ts_start = now at submit time for clean completed-session logging.
+        supabase.table(TBL_SESSIONS).upsert({
+            "session_id": st.session_state.session_id,
+            "ts_start": ts_now,
+            "identity_option": identity_option,
+            "relevance_condition": relevance_condition,
+            "name_present": "present" if show_name else "absent",
+            "picture_present": "present" if show_picture else "absent",
+        }).execute()
+
+        # 1) Save transcript (includes satisfaction field)
         supabase.table(TBL_TRANSCRIPTS).insert({
             "session_id": st.session_state.session_id,
             "ts": ts_now,
             "transcript_text": transcript_text,
-            "satisfaction": int(rating),   # <-- NEW COLUMN in transcripts
+            "satisfaction": int(rating),
         }).execute()
 
-        # 2) Save rating in separate table (keep this)
+        # 2) Save rating in separate table
         supabase.table(TBL_SATISFACTION).insert({
             "session_id": st.session_state.session_id,
             "ts": ts_now,
@@ -668,6 +649,7 @@ if st.session_state.ended and not st.session_state.rating_saved:
 
         st.session_state.rating_saved = True
         st.success("Saved. Thank you.")
+
 
 # -------------------------
 # Main interaction
@@ -713,5 +695,6 @@ if user_text and not st.session_state.ended:
     st.session_state.bot_turns += 1
 
     st.rerun()
+
 
 
