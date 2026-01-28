@@ -381,39 +381,79 @@ def llm_chat(messages: List[Dict[str, str]], temperature: float = 0.3) -> str:
     )
     return (resp.choices[0].message.content or "").strip()
 
+
+def mirror_user_intent(user_text: str) -> str:
+    """
+    Lightweight, domain-agnostic mirroring.
+
+    Goal: acknowledge the user's request without introducing new concepts.
+    """
+    t = (user_text or "").strip()
+
+    # Remove common greetings
+    t = re.sub(r"^(hi|hello|hey)\b[\s,]*", "", t, flags=re.IGNORECASE).strip()
+
+    # Clean punctuation/spacing
+    t = t.rstrip("?.! ").strip()
+    t = re.sub(r"\s+", " ", t)
+
+    if not t:
+        return "Understood."
+
+    words = t.split()
+    short = t if len(words) <= 12 else " ".join(words[:12]) + "..."
+
+    low = short.lower()
+
+    # Yes/no style questions -> "whether ..."
+    if low.startswith(("do you", "can you", "could you", "would you", "is there", "are there")):
+        parts = short.split(maxsplit=2)
+        rest = parts[2] if len(parts) >= 3 else ""
+        rest = rest[0].lower() + rest[1:] if rest else "that."
+        return f"You’re asking whether {rest}"
+
+    if "looking for" in low or low.startswith(("i need", "i want")):
+        return f"You’re looking for {short.lower()}."
+    return f"You’re asking about {short.lower()}."
+
+
 def answer_grounded(user_text: str, context: str, intent_key: Optional[str] = None) -> str:
+    """
+    Relevant answer: deterministic mirroring + grounded response.
+    """
+    mirror = mirror_user_intent(user_text)
+
     system = f"""You are Style Loom's virtual assistant for a fashion retail study.
 You MUST use the BUSINESS CONTEXT below as your source of truth. Do not invent details not supported by the context.
 
 Response rules (Study 2: RELEVANT responses):
-- Answer ONLY what the user asked. Do not add extra tips or upsell content.
+- Do NOT use apologies or inability statements (e.g., "Unfortunately, I can't...").
+- Answer ONLY what the user asked. Do not add extra tips, upsell content, or unrelated details.
 - Keep the response concise (2–4 sentences). Use a neutral, professional tone. No emojis.
-- Ask at most ONE follow-up question, only if truly needed.
+- Ask at most ONE follow-up question, only if truly needed to proceed.
 
 Formatting by intent:
-- Product-related intents (availability, size_fit, new_arrivals):
-  * If the user is asking for a recommendation: use exactly this 3-part structure:
-    (1) Mirror the user's need in ONE sentence.
-    (2) Provide ONE option/recommendation with 1–2 reasons grounded in the context.
-    (3) Ask ONE clarifying question to narrow preferences (e.g., size, color, fit, budget).
-  * If the user is asking for factual info (e.g., size chart, measurements, in-stock status): answer directly and only ask ONE question if required to identify the item/size.
-- Policy/operations intents (shipping_returns, promotions, rewards): provide a concise, concrete summary first, including key constraints (time window, conditions, eligibility, processing time) if present in the context. Do not recommend products.
+- Product-related intents (size_fit, new_arrivals):
+  * If the user is asking for a recommendation: provide ONE option with 1–2 reasons grounded in the context, then ask ONE clarifying question.
+  * If the user is asking for factual info (e.g., size chart): answer directly; ask ONE question only if needed.
+- Policy/operations intents (shipping_returns, promotions, rewards): provide a concise, concrete summary first, including key constraints (time window, conditions, eligibility, processing time) if present in the context.
 - Other/about intents (about, other): answer directly and briefly; ask ONE question only if needed.
 
 Intent: {intent_key or "unknown"}.
 """
+
     msgs = [
         {"role": "system", "content": system},
         {"role": "system", "content": f"BUSINESS CONTEXT:\n{context}"},
         {"role": "user", "content": user_text},
     ]
-    return llm_chat(msgs, temperature=0.2)
+    core = llm_chat(msgs, temperature=0.2)
+    return f"{mirror} {core}".strip()
+
 
 def answer_fallback(user_text: str) -> str:
-    system = """You are Style Loom's virtual assistant for a fashion retail study.
-    Your task is to provide responses that follow the experimental instructions precisely.
-    Only respond to what the user explicitly asks.
-    """
+    # Minimal, relevant fallback when KB retrieval fails.
+    return "Could you share one more detail so I can help (for example, the item name or what specifically you want to know)?"
 
 def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, bool]:
     intent_key = scenario_to_intent(scenario)
@@ -425,7 +465,20 @@ def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, 
         ans = answer_grounded(user_text, ctx, intent_key=used_intent)
         return ans, used_intent, True
 
-    # Availability bias by locked product type
+    
+    # Availability: use a fixed, controlled script (Study 2 relevance operationalization)
+    if intent_key == "availability":
+        mirror = mirror_user_intent(user_text)
+        reply = (
+            f"{mirror} "
+            "We currently have more than five options available in this style. "
+            "Would you like to take a look at similar options?"
+        )
+        st.session_state["last_kb_context"] = ""
+        st.session_state["last_intent_used"] = intent_key
+        return reply, intent_key, False
+
+# Availability bias by locked product type
     query_for_search = user_text
     if intent_key == "availability":
         ptype = st.session_state.get("active_product_type")
@@ -681,6 +734,7 @@ if user_text and not st.session_state.ended:
     st.session_state.bot_turns += 1
 
     st.rerun()
+
 
 
 
