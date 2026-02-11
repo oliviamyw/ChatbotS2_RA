@@ -400,20 +400,44 @@ def mirror_user_intent(user_text: str) -> str:
     if not t:
         return "Understood."
 
+    low = t.lower()
+
+    # Handle common question starters without awkward phrasing
+    starters = [
+        "can you tell me",
+        "could you tell me",
+        "can you",
+        "could you",
+        "would you",
+        "do you",
+        "is there",
+        "are there",
+    ]
+    if any(low.startswith(s) for s in starters):
+        rest = t
+        # Strip longer phrases first
+        for s in ["can you tell me", "could you tell me"]:
+            if low.startswith(s):
+                rest = t[len(s):].strip()
+                break
+        else:
+            # Strip first two words (e.g., 'can you', 'do you')
+            parts = t.split(maxsplit=2)
+            rest = parts[2].strip() if len(parts) == 3 else ""
+
+        rest = rest.rstrip("?.! ").strip()
+        if rest:
+            rest = rest[0].lower() + rest[1:]
+            return f"You want to know {rest}."
+        return "You want to know more details."
+
+    # Statements / requests
+    if "looking for" in low or low.startswith(("i need", "i want", "i'm looking for", "im looking for")):
+        return f"You’re looking for {low}."
+
+    # Default
     words = t.split()
     short = t if len(words) <= 12 else " ".join(words[:12]) + "..."
-
-    low = short.lower()
-
-    # Yes/no style questions -> "whether ..."
-    if low.startswith(("do you", "can you", "could you", "would you", "is there", "are there")):
-        parts = short.split(maxsplit=2)
-        rest = parts[2] if len(parts) >= 3 else ""
-        rest = rest[0].lower() + rest[1:] if rest else "that."
-        return f"You’re asking whether {rest}"
-
-    if "looking for" in low or low.startswith(("i need", "i want")):
-        return f"You’re looking for {short.lower()}."
     return f"You’re asking about {short.lower()}."
 
 
@@ -455,6 +479,40 @@ def answer_fallback(user_text: str) -> str:
     # Minimal, relevant fallback when KB retrieval fails.
     return "Could you share one more detail so I can help (for example, the item name or what specifically you want to know)?"
 
+
+# -------------------------
+# Availability query specificity (to avoid triggering the fixed 5+ script on broad assortment questions)
+# -------------------------
+COLOR_WORDS = [
+    "black","white","navy","blue","red","green","gray","grey","beige","brown","pink","purple","yellow","orange","cream","ivory"
+]
+
+_SIZE_RE = re.compile(r"\b(xs|s|small|m|medium|l|large|xl|x-?large|\d{1,2})\b", re.IGNORECASE)
+
+def is_specific_availability_query(text: str) -> bool:
+    t = (text or "").lower()
+
+    has_size = bool(_SIZE_RE.search(t))
+    has_color = any(c in t for c in COLOR_WORDS)
+
+    # Product / item mention (broad)
+    has_item = any(w in t for w in [
+        "dress","party dress","shirt","t-shirt","tee","top","jacket","coat","pants","trousers","joggers","leggings",
+        "hoodie","sweater","cardigan","skirt","blazer","outerwear"
+    ])
+
+    # Broad assortment phrasing (should NOT trigger fixed 5+)
+    broad = any(p in t for p in [
+        "what different", "what kinds", "what type", "what types", "what do you have", "different product",
+        "product availability", "available products", "different color", "different colors", "what colors", "colors do you have"
+    ])
+
+    if broad and not (has_size or has_color):
+        return False
+
+    return has_item and (has_size or has_color)
+
+
 def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, bool]:
     intent_key = scenario_to_intent(scenario)
 
@@ -466,8 +524,8 @@ def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, 
         return ans, used_intent, True
 
     
-    # Availability: use a fixed, controlled script (Study 2 relevance operationalization)
-    if intent_key == "availability":
+    # Availability: use a fixed, controlled script ONLY for specific item availability requests
+    if intent_key == "availability" and is_specific_availability_query(user_text):
         mirror = mirror_user_intent(user_text)
         reply = (
             f"{mirror} "
@@ -477,6 +535,7 @@ def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, 
         st.session_state["last_kb_context"] = ""
         st.session_state["last_intent_used"] = intent_key
         return reply, intent_key, False
+
 
 # Availability bias by locked product type
     query_for_search = user_text
@@ -502,9 +561,21 @@ def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, 
 
     # 3) GPT fallback
     if not context.strip():
+        # For broad availability/assortment questions, provide a simple controlled prompt rather than the fixed 5+ script
+        if intent_key == "availability":
+            mirror = mirror_user_intent(user_text)
+            reply = (
+                f"{mirror} "
+                "We offer a range of items across key categories. "
+                "Is there a specific item, color, or size you are looking for?"
+            )
+            st.session_state["last_kb_context"] = ""
+            st.session_state["last_intent_used"] = intent_key
+            return reply, intent_key, False
+
         st.session_state["last_kb_context"] = ""
         st.session_state["last_intent_used"] = intent_key
-        return answer_fallback(user_text), intent_key, False
+        return answer_fallback(user_text), intent_key, False(user_text), intent_key, False
 
     ans = answer_grounded(user_text, context, intent_key=intent_key)
 
