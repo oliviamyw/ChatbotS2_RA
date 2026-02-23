@@ -660,6 +660,129 @@ def is_specific_availability_query(text: str) -> bool:
     return has_item and (has_size or has_color)
 
 
+
+# -------------------------
+# Availability 상담형 응답: RAG/DB가 없어도 자연스럽게 "필터링/좁혀가기"를 제공
+# -------------------------
+_AVAIL_COLOR_ALIASES = {
+    "navy": "navy",
+    "khaki": "khaki",
+    "black": "black",
+    "white": "white",
+    "gray": "gray",
+    "grey": "gray",
+    "beige": "beige",
+    "ivory": "ivory",
+    "blue": "blue",
+    "brown": "brown",
+    "green": "green",
+}
+_AVAIL_ATTR_KEYWORDS = {
+    "pleated": ["pleat", "pleated", "pleats"],
+    "european": ["european", "euro", "italian", "french"],
+    "slim": ["slim", "trim"],
+    "tapered": ["taper", "tapered"],
+    "regular": ["regular", "classic"],
+    "high_rise": ["high rise", "high-rise"],
+    "mid_rise": ["mid rise", "mid-rise"],
+    "low_rise": ["low rise", "low-rise"],
+}
+
+def _update_availability_state(user_text: str) -> dict:
+    state = st.session_state.get("availability_state") or {
+        "product": None,       # e.g., pants, shirt
+        "colors": set(),
+        "size": None,          # raw size string
+        "attrs": set(),        # e.g., pleated, european
+        "turns": 0,
+    }
+    t = (user_text or "").lower()
+
+    # product inference
+    if any(w in t for w in ["pants", "trousers", "slacks"]):
+        state["product"] = "pants"
+    elif any(w in t for w in ["shirt", "shirts", "button-down", "button down", "dress shirt"]):
+        state["product"] = "shirt"
+    elif any(w in t for w in ["suit", "blazer", "jacket", "sport coat"]):
+        state["product"] = "suiting"
+
+    # colors
+    for k,v in _AVAIL_COLOR_ALIASES.items():
+        if k in t:
+            state["colors"].add(v)
+
+    # sizes
+    m = _SIZE_RE.search(t)
+    if m:
+        state["size"] = m.group(0)
+
+    # attributes
+    for attr, kws in _AVAIL_ATTR_KEYWORDS.items():
+        if any(kw in t for kw in kws):
+            state["attrs"].add(attr)
+
+    state["turns"] = int(state.get("turns", 0)) + 1
+    st.session_state["availability_state"] = state
+    return state
+
+def _availability_next_question(state: dict) -> Optional[str]:
+    # Ask at most one next question, prioritized to reduce loops.
+    attrs = state.get("attrs", set())
+
+    if state.get("product") == "pants":
+        if "pleated" in attrs:
+            return "Do you prefer a **single pleat** (subtle) or **double pleat** (more structure)?"
+        if "european" in attrs and ("slim" not in attrs and "regular" not in attrs):
+            return "For a European look, would you prefer a **slim-tapered** fit or a more **classic/regular** fit?"
+        return "Do you want a **slim-tapered** fit or a more **classic/regular** fit?"
+    if state.get("product") == "shirt":
+        return "Do you prefer a **slim** fit or a more **regular** fit?"
+    if state.get("product") == "suiting":
+        return "Are you looking for a **blazer/sport coat** or a full **suit**?"
+    return "Are you shopping for **shirts**, **trousers**, or **suiting**?"
+
+def build_availability_consult_reply(user_text: str) -> str:
+    prefix = pick_ack(int(st.session_state.get("bot_turns", 0) + 1))
+    state = _update_availability_state(user_text)
+
+    # short summary (no fake inventory counts)
+    product = state.get("product")
+    colors = sorted(list(state.get("colors", set())))
+    size = state.get("size")
+    attrs = state.get("attrs", set())
+
+    bits = []
+    if product == "pants":
+        bits.append("tailored trousers")
+    elif product == "shirt":
+        bits.append("dress shirts")
+    elif product == "suiting":
+        bits.append("suiting pieces")
+    else:
+        bits.append("formalwear options")
+
+    if colors:
+        bits.append("in " + " and ".join(colors))
+    if size:
+        bits.append(f"(size {size})")
+    if "european" in attrs:
+        bits.append("with a European-style silhouette")
+    if "pleated" in attrs:
+        bits.append("with pleats")
+
+    summary = " ".join(bits).strip()
+
+    # Provide helpful, non-hallucinatory guidance
+    guidance = (
+        "I can help you narrow down what to look for. "
+        "This chat cannot display a live product list, but you can use the filters on the product page to match your preferences."
+    )
+
+    # One next question only
+    q = _availability_next_question(state)
+
+    return f"{prefix} {summary}. {guidance} {q}".strip()
+
 def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, bool]:
     intent_key = scenario_to_intent(scenario)
 
@@ -709,15 +832,10 @@ def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, 
         return answer_fallback(user_text, intent_key=used_intent), used_intent, False
 
     # -------------------------
-    # Availability: fixed controlled script ONLY for specific item availability requests
+    # Availability: 상담형(컨설팅) 응답으로 전환 (DB/RAG 없을 때도 반복 루프 방지)
     # -------------------------
-    if intent_key == "availability" and is_specific_availability_query(user_text):
-        prefix = pick_ack(int(st.session_state.get("bot_turns", 0) + 1))
-        reply = (
-            f"{prefix} "
-            "We currently have more than five options available in this style. "
-            "Would you like to take a look at similar options?"
-        )
+    if intent_key == "availability":
+        reply = build_availability_consult_reply(user_text)
         st.session_state["last_kb_context"] = ""
         st.session_state["last_intent_used"] = intent_key
         st.session_state["last_subintent_used"] = subintent
@@ -1036,6 +1154,7 @@ if user_text and not st.session_state.ended:
     st.session_state.bot_turns += 1
 
     st.rerun()
+
 
 
 
