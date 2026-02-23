@@ -203,13 +203,44 @@ def scenario_to_intent(scenario: Optional[str]) -> str:
 # Intent detection (ENGLISH ONLY) for auto-switch (Option C)
 # -------------------------
 INTENT_KEYWORDS: Dict[str, List[str]] = {
-    "new_arrivals": ["new drop", "new arrivals", "new arrival", "new collection", "latest", "this season"],
-    "size_fit": ["size", "sizing", "fit", "measurement", "measurements", "bust", "waist", "hip", "xs", "xl", "cm", "inch"],
-    "shipping_returns": ["shipping", "delivery", "return", "returns", "exchange", "refund", "ship"],
-    "promotions": ["discount", "promo", "promotion", "coupon", "code", "sale", "deal"],
-    "rewards": ["reward", "rewards", "points", "membership", "tier", "vip"],
-    "availability": ["available", "availability", "in stock", "out of stock", "restock", "sold out", "inventory"],
-    "about": ["about", "brand", "story", "who are you", "who is", "ceo"],
+    # New arrivals / product drop (include known item names to avoid "about" misrouting)
+    "new_arrivals": [
+        "new drop", "new arrivals", "new arrival", "new collection", "latest", "this season",
+        "spring collection", "summer collection", "fall collection", "winter collection",
+        "soft blouse", "city knit", "everyday jacket", "tailored pants", "weekend dress",
+        "collection", "new products", "new product"
+    ],
+    # Size and fit
+    "size_fit": [
+        "size", "sizing", "fit", "measurement", "measurements", "bust", "waist", "hip",
+        "xs", "xl", "x-small", "x large", "cm", "inch", "inches", "runs small", "runs large"
+    ],
+    # Shipping and returns
+    "shipping_returns": [
+        "shipping", "ship", "delivery", "deliver", "carrier", "ups", "fedex", "usps", "ground",
+        "standard shipping", "express shipping", "how long", "shipping time", "delivery time", "tracking",
+        "return", "returns", "exchange", "refund", "return window", "return policy"
+    ],
+    # Promotions
+    "promotions": [
+        "discount", "promo", "promotion", "coupon", "code", "sale", "deal", "welcome10",
+        "excluded", "exclusions", "exclude", "final sale", "gift card", "mto_excluded",
+        "apply", "apply code"
+    ],
+    # Rewards / membership
+    "rewards": [
+        "reward", "rewards", "points", "membership", "member", "vip", "tier",
+        "benefits", "join", "sign up", "enroll", "account"
+    ],
+    # Availability / inventory
+    "availability": [
+        "available", "availability", "in stock", "out of stock", "restock", "sold out", "inventory",
+        "do you have", "do you carry"
+    ],
+    # About brand
+    "about": [
+        "about", "brand", "story", "who are you", "who is", "ceo", "quality", "sustainability"
+    ],
 }
 
 INTENT_TO_SCENARIO = {
@@ -223,19 +254,28 @@ INTENT_TO_SCENARIO = {
 }
 
 
-def detect_intent(user_text: str) -> Optional[str]:
+def detect_intent(user_text: str) -> Tuple[Optional[str], int]:
+    """
+    Lightweight intent detection (ENGLISH ONLY).
+    Returns (best_intent, score) where score is the number of keyword hits for that intent.
+    """
     t = (user_text or "").strip().lower()
     if not t:
-        return None
+        return None, 0
     t = re.sub(r"\s+", " ", t)
-    best_intent = None
+
+    best_intent: Optional[str] = None
     best_score = 0
+
     for intent_key, kws in INTENT_KEYWORDS.items():
         score = sum(1 for kw in kws if kw in t)
         if score > best_score:
             best_score = score
             best_intent = intent_key
-    return best_intent if best_score >= 1 else None
+
+    return (best_intent, best_score) if best_score >= 1 else (None, 0)
+
+
 
 
 # -------------------------
@@ -349,6 +389,14 @@ FOLLOWUP_ACK_PAT = re.compile(
     re.IGNORECASE,
 )
 
+TOPIC_SWITCH_PAT = re.compile(
+    r"\b(switch|change)\s+(topic|topics|subject|category)\b",
+    re.IGNORECASE,
+)
+
+def is_topic_switch_request(text: str) -> bool:
+    return bool(TOPIC_SWITCH_PAT.search((text or "").strip()))
+
 def is_generic_followup(text: str) -> bool:
     t = (text or "").strip()
     return (len(t) <= 18) and bool(FOLLOWUP_ACK_PAT.search(t))
@@ -382,102 +430,201 @@ def llm_chat(messages: List[Dict[str, str]], temperature: float = 0.3) -> str:
     return (resp.choices[0].message.content or "").strip()
 
 
-def mirror_user_intent(user_text: str) -> str:
+def format_recent_history(chat_history: List[Tuple[str, str]], limit: int = 6) -> str:
     """
-    Lightweight, domain-agnostic mirroring.
-
-    Goal: acknowledge the user's request without introducing new concepts.
+    Format the most recent turns for lightweight conversational continuity.
+    Keeps the LLM aware of local context without turning this into a free-form chat model.
     """
-    t = (user_text or "").strip()
-
-    # Remove common greetings
-    t = re.sub(r"^(hi|hello|hey)\b[\s,]*", "", t, flags=re.IGNORECASE).strip()
-
-    # Clean punctuation/spacing
-    t = t.rstrip("?.! ").strip()
-    t = re.sub(r"\s+", " ", t)
-
-    if not t:
-        return "Understood."
-
-    low = t.lower()
-
-    # Handle common question starters without awkward phrasing
-    starters = [
-        "can you tell me",
-        "could you tell me",
-        "can you",
-        "could you",
-        "would you",
-        "do you",
-        "is there",
-        "are there",
-    ]
-    if any(low.startswith(s) for s in starters):
-        rest = t
-        # Strip longer phrases first
-        for s in ["can you tell me", "could you tell me"]:
-            if low.startswith(s):
-                rest = t[len(s):].strip()
-                break
-        else:
-            # Strip first two words (e.g., 'can you', 'do you')
-            parts = t.split(maxsplit=2)
-            rest = parts[2].strip() if len(parts) == 3 else ""
-
-        rest = rest.rstrip("?.! ").strip()
-        if rest:
-            rest = rest[0].lower() + rest[1:]
-            return f"You want to know {rest}."
-        return "You want to know more details."
-
-    # Statements / requests
-    if "looking for" in low or low.startswith(("i need", "i want", "i'm looking for", "im looking for")):
-        return f"You’re looking for {low}."
-
-    # Default
-    words = t.split()
-    short = t if len(words) <= 12 else " ".join(words[:12]) + "..."
-    return f"You’re asking about {short.lower()}."
+    if not chat_history:
+        return ""
+    turns = chat_history[-limit:]
+    lines = []
+    for spk, msg in turns:
+        role = "User" if spk == "User" else chatbot_speaker()
+        lines.append(f"{role}: {msg}")
+    return "\n".join(lines)
 
 
-def answer_grounded(user_text: str, context: str, intent_key: Optional[str] = None) -> str:
+# -------------------------
+# Study 2 (Relevant) understanding cue + sub-intent detection
+# -------------------------
+ACK_ROTATION = ["Got it.", "Understood.", "Sure.", "Okay."]
+
+NEW_ARRIVALS_ITEMS = {
+    "Soft Blouse": ["soft blouse"],
+    "City Knit": ["city knit"],
+    "Everyday Jacket": ["everyday jacket"],
+    "Tailored Pants": ["tailored pants"],
+    "Weekend Dress": ["weekend dress"],
+}
+
+def detect_active_item(text: str) -> Optional[str]:
+    t = (text or "").lower()
+    for canonical, kws in NEW_ARRIVALS_ITEMS.items():
+        if any(kw in t for kw in kws):
+            return canonical
+    return None
+
+
+def detect_subintent(user_text: str, intent_key: Optional[str], active_item: Optional[str] = None) -> Optional[str]:
     """
-    Relevant answer: deterministic mirroring + grounded response.
+    Narrower intent hints used to:
+      (1) improve retrieval queries, and
+      (2) reduce mismatched answers in follow-up turns.
     """
-    mirror = mirror_user_intent(user_text)
+    t = (user_text or "").lower()
 
-    system = f"""You are Style Loom's virtual assistant for a fashion retail study.
-You MUST use the BUSINESS CONTEXT below as your source of truth. Do not invent details not supported by the context.
+    if intent_key == "shipping_returns":
+        if re.search(r"\b(how much|cost|price|fee)\b", t):
+            return "shipping_cost"
+        if re.search(r"\b(how fast|how long|delivery time|shipping time|arrive|days)\b", t):
+            return "shipping_time"
+        if re.search(r"\b(ups|fedex|usps|ground|carrier)\b", t):
+            return "shipping_carrier"
+        if re.search(r"\b(return window|within \d+|within\b|\b\d+\s*days?\b)", t) and "return" in t:
+            return "return_window"
+        if re.search(r"\b(steps|process|how do i return|how to return)\b", t):
+            return "return_steps"
+        return None
 
-Response rules (Study 2: RELEVANT responses):
-- Do NOT use apologies or inability statements (e.g., "Unfortunately, I can't...").
-- Answer ONLY what the user asked. Do not add extra tips, upsell content, or unrelated details.
-- Keep the response concise (2–4 sentences). Use a neutral, professional tone. No emojis.
-- Ask at most ONE follow-up question, only if truly needed to proceed.
+    if intent_key == "promotions":
+        if re.search(r"\b(exclude|excluded|exclusions)\b", t):
+            return "promo_exclusions"
+        if re.search(r"\b(apply|use code|promo field|checkout)\b", t):
+            return "promo_apply"
+        return None
 
-Formatting by intent:
-- Product-related intents (size_fit, new_arrivals):
-  * If the user is asking for a recommendation: provide ONE option with 1–2 reasons grounded in the context, then ask ONE clarifying question.
-  * If the user is asking for factual info (e.g., size chart): answer directly; ask ONE question only if needed.
-- Policy/operations intents (shipping_returns, promotions, rewards): provide a concise, concrete summary first, including key constraints (time window, conditions, eligibility, processing time) if present in the context.
-- Other/about intents (about, other): answer directly and briefly; ask ONE question only if needed.
+    if intent_key == "rewards":
+        if re.search(r"\b(cost|fee|price)\b", t):
+            return "membership_cost"
+        if re.search(r"\b(join|sign up|enroll|become a member|require)\b", t):
+            return "membership_join"
+        if re.search(r"\b(benefit|perks|discount)\b", t):
+            return "membership_benefits"
+        return None
+
+    if intent_key == "new_arrivals":
+        if active_item:
+            return f"item_{active_item.replace(' ', '_').lower()}"
+        if re.search(r"\b(picture|photo|image)\b", t):
+            return "product_images"
+        return None
+
+    if intent_key == "availability":
+        if re.search(r"\b(black|white|navy|blue|red|green|gray|grey|beige|brown|pink|purple|yellow|orange|cream|ivory)\b", t):
+            return "availability_color"
+        if re.search(r"\b(xs|s|small|m|medium|l|large|xl|x-?large|\d{1,2})\b", t):
+            return "availability_size"
+        return None
+
+    return None
+
+
+def pick_ack(turn_index: int) -> str:
+    return ACK_ROTATION[turn_index % len(ACK_ROTATION)]
+
+
+def extract_last_question(text_block: str) -> Optional[str]:
+    """
+    Naive extraction of the last question sentence, used to handle short follow-ups like 'Yes'.
+    """
+    if not text_block:
+        return None
+    # Split on line breaks then sentences.
+    txt = re.sub(r"\s+", " ", text_block).strip()
+    if "?" not in txt:
+        return None
+    parts = re.split(r"(?<=[\?])\s+", txt)
+    qs = [p.strip() for p in parts if p.strip().endswith("?")]
+    return qs[-1] if qs else None
+
+
+def answer_grounded(
+    user_text: str,
+    context: str,
+    intent_key: Optional[str] = None,
+    subintent: Optional[str] = None,
+    recent_history: str = "",
+    pending_question: Optional[str] = None,
+    include_ack: bool = True,
+) -> str:
+    """
+    Relevant answer: KB-grounded where possible, with a light, natural understanding cue.
+    Avoids mechanical parroting ("You're asking about ...") and category-log disclosures.
+    """
+
+    # A short, natural understanding cue (Study 2 relevant signature), without repeating the question.
+    prefix = ""
+    if include_ack:
+        turn_idx = int(st.session_state.get("bot_turns", 0) + 1)
+        prefix = pick_ack(turn_idx)
+
+    # Deterministic micro-overrides for common "missing detail" questions.
+    # These reduce awkward clarification loops when the KB does not specify a requested field.
+    low_ctx = (context or "").lower()
+    t = (user_text or "").lower()
+
+    if intent_key == "shipping_returns" and subintent == "shipping_cost":
+        if ("$" not in context) and ("shipping cost" not in low_ctx) and ("shipping fee" not in low_ctx):
+            core = (
+                "Shipping fees are calculated at checkout based on your location and the shipping speed you choose. "
+                "The policy materials list delivery timeframes but do not specify a flat shipping rate."
+            )
+            return f"{prefix} {core}".strip()
+
+    if intent_key == "rewards" and subintent == "membership_cost":
+        if ("$" not in context) and ("fee" not in low_ctx) and ("cost" not in low_ctx):
+            core = (
+                "The membership materials describe benefits and access features, but they do not list a membership fee. "
+                "If you share what you are trying to access, I can point to the relevant membership benefit."
+            )
+            return f"{prefix} {core}".strip()
+
+    system = f"""You are {CHATBOT_NAME}, Style Loom's virtual assistant in a controlled shopping Q&A study.
+
+Use BUSINESS CONTEXT as the source of truth for brand-specific facts, policies, and item details.
+If the requested brand-specific detail is not provided in the BUSINESS CONTEXT, state that plainly (no apology),
+then provide the closest related information that IS in the context.
+
+Output rules (Study 2: RELEVANT responses):
+- Do NOT repeat the user's question or describe internal routing (no "You're asking about...", no "It looks like...").
+- Be concise: 1–3 sentences (a brief acknowledgment may be added automatically).
+- Ask at most ONE follow-up question, only if it is necessary to proceed.
+- Keep tone neutral, professional, and natural. No emojis.
 
 Intent: {intent_key or "unknown"}.
+Sub-intent: {subintent or "none"}.
 """
 
-    msgs = [
-        {"role": "system", "content": system},
-        {"role": "system", "content": f"BUSINESS CONTEXT:\n{context}"},
-        {"role": "user", "content": user_text},
-    ]
-    core = llm_chat(msgs, temperature=0.2)
-    return f"{mirror} {core}".strip()
+    msgs: List[Dict[str, str]] = [{"role": "system", "content": system}]
+
+    if recent_history.strip():
+        msgs.append({"role": "system", "content": f"RECENT CHAT (for continuity):\n{recent_history}"})
+
+    if pending_question and is_generic_followup(user_text):
+        msgs.append({"role": "system", "content": f"PREVIOUS ASSISTANT QUESTION: {pending_question}"})
+
+    if context.strip():
+        msgs.append({"role": "system", "content": f"BUSINESS CONTEXT:\n{context}"})
+
+    msgs.append({"role": "user", "content": user_text})
+
+    core = llm_chat(msgs, temperature=0.2).strip()
+
+    # Final response: optional prefix + grounded core
+    return f"{prefix} {core}".strip()
 
 
-def answer_fallback(user_text: str) -> str:
-    # Minimal, relevant fallback when KB retrieval fails.
-    return "Could you share one more detail so I can help (for example, the item name or what specifically you want to know)?"
+def answer_fallback(user_text: str, intent_key: Optional[str] = None) -> str:
+    """
+    Minimal, relevant fallback when retrieval yields no usable context.
+    """
+    # Keep short and non-mechanical.
+    if intent_key in ("shipping_returns", "promotions", "rewards"):
+        return "Could you share one more detail (for example, the item name or what part of the policy you want to confirm)?"
+    if intent_key in ("size_fit", "availability", "new_arrivals"):
+        return "Could you share the item name and, if relevant, your preferred size or color?"
+    return "Could you share one more detail so I can help?"
 
 
 # -------------------------
@@ -516,38 +663,89 @@ def is_specific_availability_query(text: str) -> bool:
 def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, bool]:
     intent_key = scenario_to_intent(scenario)
 
-    # Follow-up continuity
-    if is_generic_followup(user_text) and st.session_state.get("last_kb_context", "").strip():
-        ctx = st.session_state["last_kb_context"]
-        used_intent = st.session_state.get("last_intent_used") or intent_key
-        ans = answer_grounded(user_text, ctx, intent_key=used_intent)
-        return ans, used_intent, True
+    # Track active item for new-arrivals continuity (e.g., "Weekend Dress" follow-ups).
+    item = detect_active_item(user_text)
+    if item:
+        st.session_state["active_item"] = item
+    active_item = st.session_state.get("active_item")
 
-    
-    # Availability: use a fixed, controlled script ONLY for specific item availability requests
+    # Sub-intent hint (improves retrieval and reduces mismatched policy answers)
+    subintent = detect_subintent(user_text, intent_key, active_item=active_item)
+
+    # Lightweight continuity context
+    recent_history = format_recent_history(st.session_state.get("chat_history", []), limit=6)
+    pending_q = st.session_state.get("pending_question")
+
+    # -------------------------
+    # Follow-up continuity for short replies (e.g., "Yes", "Sure")
+    # -------------------------
+    if is_generic_followup(user_text):
+        used_intent = st.session_state.get("last_intent_used") or intent_key
+        used_subintent = st.session_state.get("last_subintent_used") or subintent
+        ctx = st.session_state.get("last_kb_context", "")
+
+        if (not ctx.strip()) and used_intent not in ("none", "other"):
+            ctx = load_intent_files_as_context(used_intent)
+
+        if ctx.strip():
+            ans = answer_grounded(
+                user_text,
+                ctx,
+                intent_key=used_intent,
+                subintent=used_subintent,
+                recent_history=recent_history,
+                pending_question=pending_q,
+                include_ack=False,
+            )
+            st.session_state["last_kb_context"] = ctx
+            st.session_state["last_intent_used"] = used_intent
+            st.session_state["last_subintent_used"] = used_subintent
+            return ans, used_intent, True
+
+        # No usable context to continue with
+        st.session_state["last_kb_context"] = ""
+        st.session_state["last_intent_used"] = used_intent
+        st.session_state["last_subintent_used"] = used_subintent
+        return answer_fallback(user_text, intent_key=used_intent), used_intent, False
+
+    # -------------------------
+    # Availability: fixed controlled script ONLY for specific item availability requests
+    # -------------------------
     if intent_key == "availability" and is_specific_availability_query(user_text):
-        mirror = mirror_user_intent(user_text)
+        prefix = pick_ack(int(st.session_state.get("bot_turns", 0) + 1))
         reply = (
-            f"{mirror} "
+            f"{prefix} "
             "We currently have more than five options available in this style. "
             "Would you like to take a look at similar options?"
         )
         st.session_state["last_kb_context"] = ""
         st.session_state["last_intent_used"] = intent_key
-        return reply, intent_key, False
+        st.session_state["last_subintent_used"] = subintent
+        return reply.strip(), intent_key, False
 
-
-# Availability bias by locked product type
+    # -------------------------
+    # Retrieval query shaping (improves relevance without exposing internal routing)
+    # -------------------------
     query_for_search = user_text
+
+    # Availability bias by locked product type
     if intent_key == "availability":
         ptype = st.session_state.get("active_product_type")
         if ptype:
-            query_for_search = f"{ptype} {user_text}"
+            query_for_search = f"{ptype} {query_for_search}"
+
+    # New arrivals: pin retrieval to the last mentioned item if present
+    if intent_key == "new_arrivals" and active_item and (active_item.lower() not in query_for_search.lower()):
+        query_for_search = f"{active_item} {query_for_search}"
+
+    # Sub-intent cue for retrieval
+    if subintent:
+        query_for_search = f"{subintent.replace('_', ' ')} {query_for_search}"
 
     context = ""
     used_kb = False
 
-    # 1) Vector retrieval
+    # 1) Vector retrieval (filtered by intent)
     if vectorstore:
         context = retrieve_context(query_for_search, intent_key=intent_key, k=8, min_score=0.25)
         if context.strip():
@@ -559,31 +757,43 @@ def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, 
         if context.strip():
             used_kb = True
 
-    # 3) GPT fallback
+    # 3) Fallback when nothing is available
     if not context.strip():
-        # For broad availability/assortment questions, provide a simple controlled prompt rather than the fixed 5+ script
         if intent_key == "availability":
-            mirror = mirror_user_intent(user_text)
+            prefix = pick_ack(int(st.session_state.get("bot_turns", 0) + 1))
             reply = (
-                f"{mirror} "
+                f"{prefix} "
                 "We offer a range of items across key categories. "
                 "Is there a specific item, color, or size you are looking for?"
             )
             st.session_state["last_kb_context"] = ""
             st.session_state["last_intent_used"] = intent_key
-            return reply, intent_key, False
+            st.session_state["last_subintent_used"] = subintent
+            return reply.strip(), intent_key, False
 
         st.session_state["last_kb_context"] = ""
         st.session_state["last_intent_used"] = intent_key
-        return answer_fallback(user_text), intent_key, False(user_text), intent_key, False
+        st.session_state["last_subintent_used"] = subintent
+        return answer_fallback(user_text, intent_key=intent_key), intent_key, False
 
-    ans = answer_grounded(user_text, context, intent_key=intent_key)
+    # Grounded answer
+    ans = answer_grounded(
+        user_text,
+        context,
+        intent_key=intent_key,
+        subintent=subintent,
+        recent_history=recent_history,
+        pending_question=pending_q,
+        include_ack=True,
+    )
 
     # Persist
     st.session_state["last_kb_context"] = context
     st.session_state["last_intent_used"] = intent_key
+    st.session_state["last_subintent_used"] = subintent
 
     return ans, intent_key, used_kb
+
 
 
 # -------------------------
@@ -603,7 +813,10 @@ defaults = {
     "session_started_logged": False,
     "last_kb_context": "",
     "last_intent_used": None,
+    "last_subintent_used": None,
     "active_product_type": None,
+    "active_item": None,
+    "pending_question": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -614,7 +827,7 @@ for k, v in defaults.items():
 # -------------------------
 # Greeting (first assistant message) - EXACT TEXT YOU PROVIDED
 # -------------------------
-if not st.session_state.greeted_once:
+if (not st.session_state.greeted_once) and (not st.session_state.chat_history):
 
     greet_text = (
         "Hi, I’m Skyler, Style Loom’s virtual assistant. "
@@ -657,7 +870,7 @@ st.divider()
 # -------------------------
 for spk, msg in st.session_state.chat_history:
     if spk == chatbot_speaker():
-        st.markdown(f"**{CHATBOT_NAME}:** {msg}")
+        st.markdown(f"**{spk}:** {msg}")
     else:
         st.markdown("**User:** " + msg)
 
@@ -771,41 +984,58 @@ if user_text and not st.session_state.ended:
     user_selected = selected if selected != "— Select a scenario —" else None
     active = st.session_state.active_scenario or user_selected or "Other"
 
+    # Availability: lock product type when explicitly mentioned
     if active == "Check product availability":
         ptype = detect_product_type(user_text)
         if ptype:
             st.session_state.active_product_type = ptype
 
-    detected_intent = detect_intent(user_text)
+    # Optional auto-switch (internal only; no disclosure text).
+    # We switch only when confidence is reasonably high OR the user explicitly requests a topic switch.
+    detected_intent, detected_score = detect_intent(user_text)
     detected_scenario = INTENT_TO_SCENARIO.get(detected_intent) if detected_intent else None
+    switch_req = is_topic_switch_request(user_text)
 
-    disclosure = ""
     if detected_scenario and (detected_scenario != active):
-        disclosure = f"It looks like your question is about {detected_scenario}, so I will answer using that information."
-        st.session_state.switch_log.append({
-            "ts": datetime.datetime.utcnow().isoformat() + "Z",
-            "user_selected_scenario": user_selected,
-            "from_scenario": active,
-            "to_scenario": detected_scenario,
-            "detected_intent": detected_intent,
-            "user_text": user_text,
-        })
-        active = detected_scenario
-        st.session_state.active_scenario = active
+        should_switch = False
 
-        if active != "Check product availability":
-            st.session_state.active_product_type = None
+        # If the user did not choose a scenario (or is on "Other"), switching helps.
+        if (user_selected is None) or (active == "Other"):
+            should_switch = True
+
+        # If the user explicitly requests switching topics, allow switching on weaker evidence.
+        if switch_req and detected_score >= 1:
+            should_switch = True
+
+        # If the user did choose a topic, require stronger evidence to override it.
+        if (user_selected is not None) and (detected_score >= 2):
+            should_switch = True
+
+        if should_switch:
+            st.session_state.switch_log.append({
+                "ts": datetime.datetime.utcnow().isoformat() + "Z",
+                "user_selected_scenario": user_selected,
+                "from_scenario": active,
+                "to_scenario": detected_scenario,
+                "detected_intent": detected_intent,
+                "detected_score": detected_score,
+                "user_text": user_text,
+            })
+            active = detected_scenario
+            st.session_state.active_scenario = active
+
+            if active != "Check product availability":
+                st.session_state.active_product_type = None
 
     answer, used_intent, used_kb = generate_answer(user_text, scenario=active)
 
-    if disclosure:
-        answer = f"{disclosure}\n\n{answer}"
+    # Track the last assistant question to support short follow-ups like "Yes".
+    st.session_state["pending_question"] = extract_last_question(answer)
 
     st.session_state.chat_history.append((chatbot_speaker(), answer))
     st.session_state.bot_turns += 1
 
     st.rerun()
-
 
 
 
