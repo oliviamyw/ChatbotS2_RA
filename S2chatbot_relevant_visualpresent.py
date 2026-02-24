@@ -690,20 +690,29 @@ _AVAIL_ATTR_KEYWORDS = {
 
 def _update_availability_state(user_text: str) -> dict:
     state = st.session_state.get("availability_state") or {
-        "product": None,       # e.g., pants, shirt
+        "product": None,       # e.g., pants, shirt, outerwear, dress, suiting
         "colors": set(),
         "size": None,          # raw size string
         "attrs": set(),        # e.g., pleated, european
         "turns": 0,
+        "disclaimer_shown": False,
     }
     t = (user_text or "").lower()
+
+    # broad product inference (run first; can be overridden by more specific matches below)
+    if any(w in t for w in [
+        "coat", "coats", "overcoat", "trench", "parka", "puffer", "outerwear", "raincoat", "topcoat"
+    ]):
+        state["product"] = "outerwear"
+    if any(w in t for w in ["dress", "dresses", "sundress", "gown", "maxi", "midi"]):
+        state["product"] = "dress"
 
     # product inference
     if any(w in t for w in ["pants", "trousers", "slacks"]):
         state["product"] = "pants"
     elif any(w in t for w in ["shirt", "shirts", "button-down", "button down", "dress shirt"]):
         state["product"] = "shirt"
-    elif any(w in t for w in ["suit", "blazer", "jacket", "sport coat"]):
+    elif any(w in t for w in ["suit", "blazer", "sport coat", "suiting"]):
         state["product"] = "suiting"
 
     # colors
@@ -728,22 +737,42 @@ def _update_availability_state(user_text: str) -> dict:
 def _availability_next_question(state: dict) -> Optional[str]:
     # Ask at most one next question, prioritized to reduce loops.
     attrs = state.get("attrs", set())
+    has_fit_pref = ("slim" in attrs) or ("regular" in attrs)
 
     if state.get("product") == "pants":
         if "pleated" in attrs:
             return "Do you prefer a **single pleat** (subtle) or **double pleat** (more structure)?"
-        if "european" in attrs and ("slim" not in attrs and "regular" not in attrs):
+        if "european" in attrs and (not has_fit_pref):
             return "For a European look, would you prefer a **slim-tapered** fit or a more **classic/regular** fit?"
-        return "Do you want a **slim-tapered** fit or a more **classic/regular** fit?"
+        if not has_fit_pref:
+            return "Do you want a **slim-tapered** fit or a more **classic/regular** fit?"
+        # Next-best narrowing once fit is known
+        if not state.get("colors"):
+            return "Any color preference, such as **navy**, **black**, or **khaki**?"
+        return "Do you prefer a **mid-rise** or **high-rise**, or should the focus stay on a clean, classic look?"
     if state.get("product") == "shirt":
-        return "Do you prefer a **slim** fit or a more **regular** fit?"
+        if not has_fit_pref:
+            return "Do you prefer a **slim** fit or a more **regular** fit?"
+        # Next-best narrowing once fit is known
+        if not state.get("colors"):
+            return "Any color preference, such as **white**, **light blue**, or **navy**?"
+        return "Do you prefer a **crisper** feel or something **softer and more comfortable**?"
+    if state.get("product") == "outerwear":
+        return "What type of coat are you looking for: **wool overcoat**, **trench**, or **puffer/parka**?"
+    if state.get("product") == "dress":
+        if not state.get("colors"):
+            return "Any color preference, and do you prefer a **midi** or **maxi** length?"
+        return "Is this for a casual daytime look or a more **dressy** occasion?"
     if state.get("product") == "suiting":
         return "Are you looking for a **blazer/sport coat** or a full **suit**?"
-    return "Are you shopping for **shirts**, **trousers**, or **suiting**?"
+    return "Are you shopping for **tops**, **bottoms**, **outerwear**, or **dresses**?"
 
 def build_availability_consult_reply(user_text: str) -> str:
     prefix = pick_ack(int(st.session_state.get("bot_turns", 0) + 1))
     state = _update_availability_state(user_text)
+
+    t = (user_text or "").lower()
+    is_count_q = bool(re.search(r"\bhow many\b|\bnumber of\b|\bstock count\b|\bhow many\b.*\bin stock\b", t))
 
     # short summary (no fake inventory counts)
     product = state.get("product")
@@ -758,8 +787,12 @@ def build_availability_consult_reply(user_text: str) -> str:
         bits.append("dress shirts")
     elif product == "suiting":
         bits.append("suiting pieces")
+    elif product == "outerwear":
+        bits.append("men's coats")
+    elif product == "dress":
+        bits.append("dresses")
     else:
-        bits.append("formalwear options")
+        bits.append("items")
 
     if colors:
         bits.append("in " + " and ".join(colors))
@@ -772,16 +805,23 @@ def build_availability_consult_reply(user_text: str) -> str:
 
     summary = " ".join(bits).strip()
 
-    # Provide helpful, non-hallucinatory guidance
-    guidance = (
-        "I can help you narrow down what to look for. "
-        "This chat cannot display a live product list, but you can use the filters on the product page to match your preferences."
-    )
+    # Guidance: show full disclaimer once per availability flow to prevent repetitive loops.
+    if not state.get("disclaimer_shown"):
+        guidance = (
+            "I can help you narrow down what to look for. "
+            "This chat cannot display a live product list or exact stock counts, but you can use the filters on the product page to match your preferences."
+        )
+        state["disclaimer_shown"] = True
+        st.session_state["availability_state"] = state
+    else:
+        guidance = "I can help you narrow it down using one quick filter."
 
-    # One next question only
     q = _availability_next_question(state)
 
-    return f"{prefix} {summary}. {guidance} {q}".strip()
+    if is_count_q:
+        return f"{prefix} I can’t see a live stock count inside this chat. For {summary}, the fastest approach is filtering by category and size on the product page. {guidance} {q}".strip()
+
+    return f"{prefix} For {summary}, {guidance} {q}".strip()
 
 def generate_answer(user_text: str, scenario: Optional[str]) -> Tuple[str, str, bool]:
     intent_key = scenario_to_intent(scenario)
