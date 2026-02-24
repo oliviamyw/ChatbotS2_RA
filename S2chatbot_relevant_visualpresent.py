@@ -634,12 +634,44 @@ COLOR_WORDS = [
     "black","white","navy","blue","red","green","gray","grey","beige","brown","pink","purple","yellow","orange","cream","ivory"
 ]
 
-_SIZE_RE = re.compile(r"\b(xs|s|small|m|medium|l|large|xl|x-?large|\d{1,2})\b", re.IGNORECASE)
+# Size extraction: avoid false matches like the possessive "'s" in "women's"
+_SIZE_ALPHA_CTX_RE = re.compile(
+    r"(?:\bsize\b|\bin\s+(?:a\s+)?size\b|\bsize:\b)\s*(xs|s|m|l|xl|x-?large|small|medium|large)\b",
+    re.IGNORECASE
+)
+_SIZE_NUM_CTX_RE = re.compile(
+    r"(?:\bsize\b|\bin\s+(?:a\s+)?size\b|\bwaist\b|\binseam\b|\blength\b)\s*(\d{1,2}(?:/\d{1,2})?)\b",
+    re.IGNORECASE
+)
+_SIZE_SLASH_RE = re.compile(r"\b\d{1,2}/\d{1,2}\b")
+
+def extract_size(text: str) -> Optional[str]:
+    """Extract a size only when the user explicitly indicates a size."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+
+    # Common W/L style (e.g., 34/34) often appears without the word "size"
+    m = _SIZE_SLASH_RE.search(t)
+    if m:
+        return m.group(0)
+
+    # Numeric sizes when explicitly indicated
+    m = _SIZE_NUM_CTX_RE.search(t)
+    if m:
+        return m.group(1)
+
+    # Alpha sizes when explicitly indicated
+    m = _SIZE_ALPHA_CTX_RE.search(t)
+    if m:
+        return m.group(1)
+
+    return None
 
 def is_specific_availability_query(text: str) -> bool:
     t = (text or "").lower()
 
-    has_size = bool(_SIZE_RE.search(t))
+    has_size = bool(extract_size(t))
     has_color = any(c in t for c in COLOR_WORDS)
 
     # Product / item mention (broad)
@@ -721,9 +753,9 @@ def _update_availability_state(user_text: str) -> dict:
             state["colors"].add(v)
 
     # sizes
-    m = _SIZE_RE.search(t)
-    if m:
-        state["size"] = m.group(0)
+    sz = extract_size(t)
+    if sz:
+        state["size"] = sz
 
     # attributes
     for attr, kws in _AVAIL_ATTR_KEYWORDS.items():
